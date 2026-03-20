@@ -1,32 +1,46 @@
 // server/src/services/githubService.js
 
-import axios from "axios";
 import UserAnalysis from "../models/UserAnalysis.js";
+import githubClient from "../utils/githubClient.js";
 
-export const analyzeUser = async (username) => {
+export const analyzeUser = async (username, forceRefresh = false) => {
+  let existing;
+
   try {
     // -----------------------------
-    // 🔥 CHECK CACHE FIRST
+    // 🔥 CACHE CHECK
     // -----------------------------
-    const existing = await UserAnalysis.findOne({ username });
+    existing = await UserAnalysis.findOne({ username });
 
-    if (existing) {
+    if (existing && !forceRefresh) {
       const isFresh =
         Date.now() - new Date(existing.updatedAt).getTime() <
         24 * 60 * 60 * 1000;
 
-      if (isFresh) {
-        return existing.data; // ✅ RETURN CACHED DATA
-      }
+      if (isFresh) return existing.data;
     }
 
     // -----------------------------
-    // 🔥 FETCH FROM GITHUB
+    // 🔥 SAFE REQUEST
+    // -----------------------------
+    const safeRequest = async (fn) => {
+      try {
+        return await fn();
+      } catch (error) {
+        if (error.response?.status === 403) {
+          throw new Error("RATE_LIMIT");
+        }
+        throw error;
+      }
+    };
+
+    // -----------------------------
+    // 🔥 FETCH DATA
     // -----------------------------
     const [userRes, repoRes, eventsRes] = await Promise.all([
-      axios.get(`https://api.github.com/users/${username}`),
-      axios.get(`https://api.github.com/users/${username}/repos`),
-      axios.get(`https://api.github.com/users/${username}/events`),
+      safeRequest(() => githubClient.get(`/users/${username}`)),
+      safeRequest(() => githubClient.get(`/users/${username}/repos`)),
+      safeRequest(() => githubClient.get(`/users/${username}/events`)),
     ]);
 
     const user = userRes.data;
@@ -41,7 +55,6 @@ export const analyzeUser = async (username) => {
 
     repos.forEach((repo) => {
       totalStars += repo.stargazers_count;
-
       if (repo.language) {
         languages[repo.language] =
           (languages[repo.language] || 0) + 1;
@@ -62,7 +75,7 @@ export const analyzeUser = async (username) => {
     };
 
     // -----------------------------
-    // 🔥 SCORING
+    // 🔥 ROLE SCORING
     // -----------------------------
     const calculateScores = () => {
       let backendScore = 0;
@@ -87,21 +100,68 @@ export const analyzeUser = async (username) => {
     const scores = calculateScores();
 
     // -----------------------------
+    // 🔥 REPO QUALITY
+    // -----------------------------
+    const calculateRepoQuality = (repo) => {
+      let score = 0;
+
+      score += Math.min(repo.stargazers_count / 50, 30);
+      score += Math.min(repo.forks_count / 20, 20);
+
+      const issuePenalty = Math.min(repo.open_issues_count * 2, 15);
+      score -= issuePenalty;
+
+      score += Math.min(repo.size / 1000, 15);
+
+      const daysAgo =
+        (Date.now() - new Date(repo.updated_at)) /
+        (1000 * 60 * 60 * 24);
+
+      if (daysAgo < 30) score += 20;
+      else if (daysAgo < 90) score += 10;
+      else score += 2;
+
+      return Math.max(0, Math.min(score, 100));
+    };
+
+    const repoScores = repos.map((repo) => ({
+      name: repo.name,
+      stars: repo.stargazers_count,
+      qualityScore: calculateRepoQuality(repo),
+    }));
+
+    const topQualityRepos = [...repoScores] // ✅ FIX mutation bug
+      .sort((a, b) => b.qualityScore - a.qualityScore)
+      .slice(0, 3);
+
+    // 🔥 WEIGHTED QUALITY (IMPORTANT FIX)
+    const weightedScore =
+      repoScores.reduce((sum, r) => {
+        return sum + r.qualityScore * (r.stars + 1);
+      }, 0) /
+      repoScores.reduce((sum, r) => sum + (r.stars + 1), 0);
+
+    const hasHighQualityRepo = repoScores.some(
+      (r) => r.qualityScore > 75
+    );
+
+    // -----------------------------
     // 🔥 ACTIVITY
     // -----------------------------
+    const pushEvents = events.filter(
+      (e) => e.type === "PushEvent"
+    ).length;
+
     const activity = {
-      recentPushEvents: events.filter(e => e.type === "PushEvent").length,
-      recentActivityScore: Math.min(
-        events.filter(e => e.type === "PushEvent").length * 5,
-        100
-      ),
+      recentPushEvents: pushEvents,
+      recentActivityScore: Math.min(pushEvents * 5, 100),
     };
 
     // -----------------------------
     // 🔥 CONSISTENCY
     // -----------------------------
     const calculateConsistency = async () => {
-      const topRepos = repos
+      const topRepos = [...repos]
         .sort((a, b) => b.stargazers_count - a.stargazers_count)
         .slice(0, 3);
 
@@ -109,8 +169,10 @@ export const analyzeUser = async (username) => {
 
       for (const repo of topRepos) {
         try {
-          const commitsRes = await axios.get(
-            `https://api.github.com/repos/${username}/${repo.name}/commits?per_page=30`
+          const commitsRes = await safeRequest(() =>
+            githubClient.get(
+              `/repos/${username}/${repo.name}/commits?per_page=30`
+            )
           );
 
           commitsRes.data.forEach((commit) => {
@@ -121,9 +183,7 @@ export const analyzeUser = async (username) => {
         }
       }
 
-      if (!commitDates.length) {
-        return { consistencyScore: 0 };
-      }
+      if (!commitDates.length) return { consistencyScore: 0 };
 
       const periods = {};
 
@@ -153,15 +213,19 @@ export const analyzeUser = async (username) => {
         : "Full Stack Developer";
 
     // -----------------------------
-    // 🔥 INSIGHT
+    // 🔥 INSIGHT (UPGRADED)
     // -----------------------------
     const insight = {
       roleFit: personality,
       summary: `${username} is a ${personality.toLowerCase()} with ${
         activity.recentActivityScore > 60 ? "high" : "moderate"
-      } recent activity and ${
+      } activity, ${
         consistency.consistencyScore > 60 ? "good" : "limited"
-      } consistency.`,
+      } consistency, and ${
+        hasHighQualityRepo
+          ? "at least one high-impact, high-quality project"
+          : "moderate overall project quality"
+      }.`,
     };
 
     // -----------------------------
@@ -177,12 +241,17 @@ export const analyzeUser = async (username) => {
       scores,
       activity,
       consistency,
+      quality: {
+        averageScore: Math.round(weightedScore),
+        hasHighQualityRepo,
+        topRepos: topQualityRepos,
+      },
       personality,
       insight,
     };
 
     // -----------------------------
-    // 🔥 SAVE TO MONGODB
+    // 🔥 SAVE CACHE
     // -----------------------------
     await UserAnalysis.findOneAndUpdate(
       { username },
@@ -197,6 +266,9 @@ export const analyzeUser = async (username) => {
 
   } catch (error) {
     console.error("GitHub Service Error:", error.message);
+
+    if (existing) return existing.data;
+
     throw new Error("GitHub API failed");
   }
 };

@@ -2,6 +2,7 @@
 
 import mongoose from "mongoose";
 
+
 const userAnalysisSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
 

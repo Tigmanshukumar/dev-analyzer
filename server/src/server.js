@@ -1,9 +1,11 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import analyzeRoutes from "./routes/analyzeRoutes.js";
 import { connectDB } from "./config/db.js";
-import dotenv from "dotenv";
-dotenv.config();
+
 const app = express();
 
 app.use(cors());
@@ -12,6 +14,8 @@ app.use(express.json());
 app.use("/api", analyzeRoutes);
 
 connectDB();
+
+
 
 const PORT = 5000;
 
