@@ -55,6 +55,7 @@ export const analyzeUser = async (username, forceRefresh = false) => {
 
     repos.forEach((repo) => {
       totalStars += repo.stargazers_count;
+
       if (repo.language) {
         languages[repo.language] =
           (languages[repo.language] || 0) + 1;
@@ -130,16 +131,15 @@ export const analyzeUser = async (username, forceRefresh = false) => {
       qualityScore: calculateRepoQuality(repo),
     }));
 
-    const topQualityRepos = [...repoScores] // ✅ FIX mutation bug
+    const topQualityRepos = [...repoScores]
       .sort((a, b) => b.qualityScore - a.qualityScore)
       .slice(0, 3);
 
-    // 🔥 WEIGHTED QUALITY (IMPORTANT FIX)
     const weightedScore =
       repoScores.reduce((sum, r) => {
         return sum + r.qualityScore * (r.stars + 1);
       }, 0) /
-      repoScores.reduce((sum, r) => sum + (r.stars + 1), 0);
+      (repoScores.reduce((sum, r) => sum + (r.stars + 1), 0) || 1);
 
     const hasHighQualityRepo = repoScores.some(
       (r) => r.qualityScore > 75
@@ -213,7 +213,35 @@ export const analyzeUser = async (username, forceRefresh = false) => {
         : "Full Stack Developer";
 
     // -----------------------------
-    // 🔥 INSIGHT (UPGRADED)
+    // 🔥 HIREABILITY (FIXED)
+    // -----------------------------
+    const calculateHireability = () => {
+      let score = 0;
+
+      score += weightedScore * 0.4;
+      score += consistency.consistencyScore * 0.2;
+      score += activity.recentActivityScore * 0.15;
+
+      // ⚠️ reduced weight (avoid bias)
+      score += scores.popularityScore * 0.1;
+
+      if (hasHighQualityRepo) score += 10;
+
+      return Math.min(Math.round(score), 100);
+    };
+
+    const getHireLabel = (score) => {
+      if (score >= 80) return "Strong Hire";
+      if (score >= 65) return "Hire";
+      if (score >= 50) return "Consider";
+      return "Low Priority";
+    };
+
+    const hireabilityScore = calculateHireability();
+    const hireLabel = getHireLabel(hireabilityScore);
+
+    // -----------------------------
+    // 🔥 INSIGHT
     // -----------------------------
     const insight = {
       roleFit: personality,
@@ -223,9 +251,9 @@ export const analyzeUser = async (username, forceRefresh = false) => {
         consistency.consistencyScore > 60 ? "good" : "limited"
       } consistency, and ${
         hasHighQualityRepo
-          ? "at least one high-impact, high-quality project"
-          : "moderate overall project quality"
-      }.`,
+          ? "strong project quality"
+          : "moderate project quality"
+      }. Overall evaluation: ${hireLabel}.`,
     };
 
     // -----------------------------
@@ -245,6 +273,10 @@ export const analyzeUser = async (username, forceRefresh = false) => {
         averageScore: Math.round(weightedScore),
         hasHighQualityRepo,
         topRepos: topQualityRepos,
+      },
+      hireability: {
+        score: hireabilityScore,
+        label: hireLabel,
       },
       personality,
       insight,
