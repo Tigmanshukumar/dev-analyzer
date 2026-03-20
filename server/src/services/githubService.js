@@ -1,11 +1,27 @@
 // server/src/services/githubService.js
 
 import axios from "axios";
+import UserAnalysis from "../models/UserAnalysis.js";
 
 export const analyzeUser = async (username) => {
   try {
     // -----------------------------
-    // 🔥 FETCH BASE DATA
+    // 🔥 CHECK CACHE FIRST
+    // -----------------------------
+    const existing = await UserAnalysis.findOne({ username });
+
+    if (existing) {
+      const isFresh =
+        Date.now() - new Date(existing.updatedAt).getTime() <
+        24 * 60 * 60 * 1000;
+
+      if (isFresh) {
+        return existing.data; // ✅ RETURN CACHED DATA
+      }
+    }
+
+    // -----------------------------
+    // 🔥 FETCH FROM GITHUB
     // -----------------------------
     const [userRes, repoRes, eventsRes] = await Promise.all([
       axios.get(`https://api.github.com/users/${username}`),
@@ -71,25 +87,18 @@ export const analyzeUser = async (username) => {
     const scores = calculateScores();
 
     // -----------------------------
-    // 🔥 RECENT ACTIVITY
+    // 🔥 ACTIVITY
     // -----------------------------
-    const calculateActivity = () => {
-      let pushEvents = 0;
-
-      events.forEach((event) => {
-        if (event.type === "PushEvent") pushEvents++;
-      });
-
-      return {
-        recentPushEvents: pushEvents,
-        recentActivityScore: Math.min(pushEvents * 5, 100),
-      };
+    const activity = {
+      recentPushEvents: events.filter(e => e.type === "PushEvent").length,
+      recentActivityScore: Math.min(
+        events.filter(e => e.type === "PushEvent").length * 5,
+        100
+      ),
     };
 
-    const activity = calculateActivity();
-
     // -----------------------------
-    // 🔥 COMMIT CONSISTENCY (NEW)
+    // 🔥 CONSISTENCY
     // -----------------------------
     const calculateConsistency = async () => {
       const topRepos = repos
@@ -107,33 +116,27 @@ export const analyzeUser = async (username) => {
           commitsRes.data.forEach((commit) => {
             commitDates.push(commit.commit.author.date);
           });
-        } catch (err) {
+        } catch {
           continue;
         }
       }
 
-      if (commitDates.length === 0) {
-        return {
-          consistencyScore: 0,
-          message: "No recent commit data available",
-        };
+      if (!commitDates.length) {
+        return { consistencyScore: 0 };
       }
 
-      // Group commits by week
-      const weeks = {};
+      const periods = {};
 
       commitDates.forEach((date) => {
-        const week = new Date(date).toISOString().slice(0, 7); // YYYY-MM
-        weeks[week] = (weeks[week] || 0) + 1;
+        const key = new Date(date).toISOString().slice(0, 7);
+        periods[key] = true;
       });
 
-      const activeWeeks = Object.keys(weeks).length;
-
-      const consistencyScore = Math.min(activeWeeks * 20, 100);
+      const activePeriods = Object.keys(periods).length;
 
       return {
-        activePeriods: activeWeeks,
-        consistencyScore,
+        activePeriods,
+        consistencyScore: Math.min(activePeriods * 20, 100),
       };
     };
 
@@ -142,57 +145,29 @@ export const analyzeUser = async (username) => {
     // -----------------------------
     // 🔥 PERSONALITY
     // -----------------------------
-    const getPersonality = () => {
-      if (scores.backendScore > scores.frontendScore + 10)
-        return "Backend Developer";
-      if (scores.frontendScore > scores.backendScore + 10)
-        return "Frontend Developer";
-      return "Full Stack Developer";
-    };
-
-    const personality = getPersonality();
+    const personality =
+      scores.backendScore > scores.frontendScore + 10
+        ? "Backend Developer"
+        : scores.frontendScore > scores.backendScore + 10
+        ? "Frontend Developer"
+        : "Full Stack Developer";
 
     // -----------------------------
     // 🔥 INSIGHT
     // -----------------------------
-    const generateInsight = () => {
-      return {
-        roleFit: personality,
-
-        summary: `${username} is a ${personality.toLowerCase()} with ${
-          activity.recentActivityScore > 60 ? "high" : "moderate"
-        } recent activity and ${
-          consistency.consistencyScore > 60 ? "good" : "limited"
-        } consistency.`,
-
-        strengths: [
-          scores.popularityScore > 50
-            ? "High project impact"
-            : "Consistent project building",
-
-          consistency.consistencyScore > 60
-            ? "Strong long-term consistency"
-            : "Some consistent contribution patterns",
-        ],
-
-        weaknesses: [
-          consistency.consistencyScore < 30
-            ? "Low long-term consistency"
-            : "Consistency could improve",
-
-          metrics.languageDiversity <= 2
-            ? "Limited technology exposure"
-            : "Moderate specialization",
-        ],
-      };
+    const insight = {
+      roleFit: personality,
+      summary: `${username} is a ${personality.toLowerCase()} with ${
+        activity.recentActivityScore > 60 ? "high" : "moderate"
+      } recent activity and ${
+        consistency.consistencyScore > 60 ? "good" : "limited"
+      } consistency.`,
     };
 
-    const insight = generateInsight();
-
     // -----------------------------
-    // 🔥 FINAL RESPONSE
+    // 🔥 FINAL RESULT
     // -----------------------------
-    return {
+    const result = {
       profile: {
         username: user.login,
         avatar: user.avatar_url,
@@ -205,6 +180,21 @@ export const analyzeUser = async (username) => {
       personality,
       insight,
     };
+
+    // -----------------------------
+    // 🔥 SAVE TO MONGODB
+    // -----------------------------
+    await UserAnalysis.findOneAndUpdate(
+      { username },
+      {
+        data: result,
+        updatedAt: new Date(),
+      },
+      { upsert: true }
+    );
+
+    return result;
+
   } catch (error) {
     console.error("GitHub Service Error:", error.message);
     throw new Error("GitHub API failed");
