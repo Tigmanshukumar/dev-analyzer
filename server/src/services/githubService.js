@@ -146,6 +146,15 @@ export const analyzeUser = async (username, forceRefresh = false) => {
       (r) => r.qualityScore > 75
     );
 
+
+
+
+    const avgQualityScore = Math.round(weightedScore);
+
+    const qualityLabel =
+      avgQualityScore > 70 ? "high" :
+      avgQualityScore > 50 ? "moderate" :
+      "low";
     // -----------------------------
     // 🔥 ACTIVITY
     // -----------------------------
@@ -271,7 +280,8 @@ export const analyzeUser = async (username, forceRefresh = false) => {
       activity,
       consistency,
       quality: {
-        averageScore: Math.round(weightedScore),
+        averageScore: avgQualityScore,
+        label: qualityLabel,
         hasHighQualityRepo,
         topRepos: topQualityRepos,
       },
