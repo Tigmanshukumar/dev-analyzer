@@ -5,34 +5,27 @@ const router = express.Router();
 
 router.get("/compare", async (req, res) => {
   try {
-    const { users } = req.query;
+    const { users, role } = req.query;
 
     if (!users) {
       return res.status(400).json({
-        error: "Provide users query param",
+        error: "Provide users",
       });
     }
 
     const usernames = users.split(",");
 
-    if (usernames.length < 2) {
-      return res.status(400).json({
-        error: "Minimum 2 users required",
-      });
-    }
-
-    const result = await compareUsers(usernames);
+    const result = await compareUsers(
+      usernames,
+      role || "general"
+    );
 
     res.json({
       success: true,
       data: result,
     });
   } catch (error) {
-    console.error("Compare Error:", error.message);
-
-    res.status(500).json({
-      error: "Comparison failed",
-    });
+    res.status(500).json({ error: "Comparison failed" });
   }
 });
 

@@ -2,6 +2,7 @@
 
 import UserAnalysis from "../models/UserAnalysis.js";
 import githubClient from "../utils/githubClient.js";
+import { generateSummary } from "./aiService.js";
 
 export const analyzeUser = async (username, forceRefresh = false) => {
   let existing;
@@ -281,6 +282,9 @@ export const analyzeUser = async (username, forceRefresh = false) => {
       personality,
       insight,
     };
+
+    const aiSummary = await generateSummary(result);
+    result.ai = { summary: aiSummary };
 
     // -----------------------------
     // 🔥 SAVE CACHE
